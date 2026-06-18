@@ -1,0 +1,10 @@
+{
+  "applications": {
+    "ABTSSesats": {
+      "applicationId": "uYbcV87y6RkA7YbT6HdMjEP84x1oDKbDP2ZFsoHM"
+    },
+    "_default": {
+      "link": "ABTSSesats"
+    }
+  }
+}
