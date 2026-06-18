@@ -96,14 +96,16 @@ Parse.Cloud.define("listInstitutions", async () => {
   const query = new Parse.Query(Institution);
 
   query.ascending("name");
-  query.select("name", "city");
   query.limit(1000);
 
   const institutions = await query.find({ useMasterKey: true });
 
-  return institutions.map((institution) => ({
-    objectId: institution.id,
-    name: institution.get("name") || "",
-    city: institution.get("city") || "",
-  }));
+  return institutions.map((institution) => {
+    const institutionData = institution.toJSON();
+
+    return {
+      objectId: institution.id,
+      ...institutionData,
+    };
+  });
 });
