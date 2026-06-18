@@ -161,12 +161,21 @@ Parse.Cloud.define("editInstitution", async (request) => {
 
   applyInstitutionFields(institution, request.params || {});
 
+  const duplicateInstitution = await findDuplicateInstitutionByName(institution.get("name"), {
+    excludeObjectId: objectId,
+  });
+  if (duplicateInstitution) {
+    throw new Parse.Error(
+      Parse.Error.VALIDATION_ERROR,
+      `An institution named "${duplicateInstitution.get("name")}" already exists or is too similar.`
+    );
+  }
+
   const savedInstitution = await institution.save(null, { useMasterKey: true });
 
   return {
     objectId: savedInstitution.id,
-    name: savedInstitution.get("name"),
-    city: savedInstitution.get("city") || "",
+    ...savedInstitution.toJSON(),
   };
 });
 
