@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const Institution = Parse.Object.extend("Institution");
 const Specialty = Parse.Object.extend("Specialty");
 const UserInvitation = Parse.Object.extend("UserInvitation");
+const UserRoleAssignment = Parse.Object.extend("UserRoleAssignment");
 
 const ALLOWED_ROLE_NAMES = new Set([
   "super_admin",
@@ -16,6 +17,12 @@ const ALLOWED_ROLE_NAMES = new Set([
 
 const ALLOWED_CREDENTIALS = new Set(["MD", "DO", "PhD", "PA", "NP", "RN", "Other"]);
 const INVITATION_EXPIRATION_DAYS = 30;
+const RESEND_API_URL = "https://api.resend.com/emails";
+// TODO: Replace this with the real deployed website domain that serves accept-invitation.html.
+// For local testing, use localhost until a production domain is available.
+const INVITATION_ACCEPT_BASE_URL = "http://localhost:8000";
+// TODO: Replace this with a verified Resend sender domain before production use.
+const RESEND_FROM_EMAIL = "SESATS Administration <onboarding@YOUR_VERIFIED_RESEND_DOMAIN>";
 
 function requireString(value, fieldName) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -73,6 +80,62 @@ function buildCaseInsensitiveRegex(value) {
   return new RegExp(`^${escapedValue}$`, "i");
 }
 
+function getRoleDisplayName(roleName) {
+  const roleDisplayNames = {
+    super_admin: "Super Admin",
+    admin: "Administrator",
+    editor: "Editor",
+    reviewer: "Reviewer",
+    ai_generator: "AI Generator",
+    subscriber: "Subscriber",
+    institution_admin: "Institution Administrator",
+  };
+
+  return roleDisplayNames[roleName] || roleName;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+
+    return entities[character] || character;
+  });
+}
+
+function formatDateForDisplay(value) {
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(value);
+}
+
+function buildInvitationUrl(rawToken) {
+  return `${INVITATION_ACCEPT_BASE_URL}/accept-invitation.html?token=${encodeURIComponent(rawToken)}`;
+}
+
+function appendNotes(existingNotes, appendedMessage) {
+  const sanitizedExistingNotes = normalizeOptionalString(existingNotes, "notes");
+  const sanitizedMessage = normalizeOptionalString(appendedMessage, "notes");
+
+  if (!sanitizedMessage) {
+    return sanitizedExistingNotes;
+  }
+
+  if (!sanitizedExistingNotes) {
+    return sanitizedMessage;
+  }
+
+  return `${sanitizedExistingNotes}\n${sanitizedMessage}`;
+}
+
 async function requireAuthenticatedUser(request) {
   if (!request.user) {
     throw new Parse.Error(Parse.Error.SESSION_MISSING, "You must be logged in to invite users.");
@@ -123,12 +186,22 @@ async function requireActiveSpecialty(objectId) {
   return specialty;
 }
 
-async function ensureEmailIsAvailable(email) {
-  const existingUserQuery = new Parse.Query(Parse.User);
-  existingUserQuery.matches("email", buildCaseInsensitiveRegex(email));
-  existingUserQuery.limit(1);
+async function findExistingUserByEmail(email) {
+  const query = new Parse.Query(Parse.User);
+  query.matches("email", buildCaseInsensitiveRegex(email));
+  query.limit(1);
+  return query.first({ useMasterKey: true });
+}
 
-  const existingUser = await existingUserQuery.first({ useMasterKey: true });
+async function findExistingUserByUsername(username) {
+  const query = new Parse.Query(Parse.User);
+  query.matches("username", buildCaseInsensitiveRegex(username));
+  query.limit(1);
+  return query.first({ useMasterKey: true });
+}
+
+async function ensureEmailIsAvailable(email) {
+  const existingUser = await findExistingUserByEmail(email);
 
   if (existingUser) {
     throw new Parse.Error(
@@ -152,6 +225,38 @@ async function ensureEmailIsAvailable(email) {
   }
 }
 
+async function ensureNoExistingUserForEmail(email) {
+  const existingUser = await findExistingUserByEmail(email);
+
+  if (existingUser) {
+    throw new Parse.Error(
+      Parse.Error.VALIDATION_ERROR,
+      "A user with this email address already exists."
+    );
+  }
+}
+
+async function ensureUsernameIsAvailable(username) {
+  const existingUser = await findExistingUserByUsername(username);
+
+  if (existingUser) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, "That username is already taken.");
+  }
+}
+
+async function requireRoleByName(roleName) {
+  const roleQuery = new Parse.Query(Parse.Role);
+  roleQuery.equalTo("name", roleName);
+  roleQuery.limit(1);
+
+  const role = await roleQuery.first({ useMasterKey: true });
+  if (!role) {
+    throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, "The requested role could not be found.");
+  }
+
+  return role;
+}
+
 function generateInvitationToken() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -166,15 +271,141 @@ function buildExpirationDate() {
   return expirationDate;
 }
 
-async function sendInvitationEmailStub(email, invitationUrl, displayName, invitationMessage) {
-  console.log("Invitation email stub prepared.", {
-    email,
+function requireResendApiKey() {
+  const apiKey = process.env.RESEND_API_KEY;
+
+  if (!apiKey) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "RESEND_API_KEY is not configured in the Back4App environment."
+    );
+  }
+
+  return apiKey;
+}
+
+async function sendInvitationEmail({
+  email,
+  displayName,
+  roleName,
+  invitationUrl,
+  tokenExpiresAt,
+  invitationMessage,
+}) {
+  const resendApiKey = requireResendApiKey();
+  const roleDisplayName = getRoleDisplayName(roleName);
+  const expirationDate = formatDateForDisplay(tokenExpiresAt);
+  const invitationMessageHtml = escapeHtml(invitationMessage).replace(/\n/g, "<br />");
+  const messageSection = invitationMessage
+    ? `
+      <p style="margin: 0 0 18px; color: #08285c; line-height: 1.7;">
+        <strong>Invitation message:</strong><br />
+        ${invitationMessageHtml}
+      </p>
+    `
+    : "";
+
+  const html = `
+    <div style="background: #f7f9fd; padding: 32px 18px; font-family: Arial, sans-serif; color: #08285c;">
+      <div style="max-width: 640px; margin: 0 auto; background: #ffffff; border-radius: 20px; box-shadow: 0 18px 50px rgba(0, 40, 95, 0.08); overflow: hidden;">
+        <div style="padding: 24px 28px; background: linear-gradient(135deg, #00285f, #001d47); color: #ffffff;">
+          <h1 style="margin: 0; font-size: 24px;">SESATS Invitation</h1>
+        </div>
+        <div style="padding: 28px;">
+          <p style="margin: 0 0 18px; line-height: 1.7;">Dear ${escapeHtml(displayName)},</p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">
+            Please accept this invitation as a(n) ${escapeHtml(roleDisplayName)} for the SESATS Administration platform.
+          </p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">
+            You have been invited to create an account. To accept the invitation, click the link below and choose your username and password.
+          </p>
+          ${messageSection}
+          <p style="margin: 28px 0;">
+            <a
+              href="${escapeHtml(invitationUrl)}"
+              style="display: inline-block; padding: 14px 22px; border-radius: 999px; background: #174b93; color: #ffffff; text-decoration: none; font-weight: 700;"
+            >Accept Invitation</a>
+          </p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">
+            If the button above does not work, use this link:<br />
+            <a href="${escapeHtml(invitationUrl)}" style="color: #174b93; word-break: break-word;">${escapeHtml(invitationUrl)}</a>
+          </p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">This invitation will expire on ${escapeHtml(expirationDate)}.</p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">
+            If you were not expecting this invitation, you may ignore this email.
+          </p>
+          <p style="margin: 0; line-height: 1.7;">SESATS Administration</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const text = [
+    `Dear ${displayName},`,
+    "",
+    `Please accept this invitation as a(n) ${roleDisplayName} for the SESATS Administration platform.`,
+    "",
+    "You have been invited to create an account. To accept the invitation, click the link below and choose your username and password.",
+    "",
     invitationUrl,
-    displayName,
-    invitationMessage,
+    "",
+    invitationMessage ? `Invitation message: ${invitationMessage}` : "",
+    invitationMessage ? "" : null,
+    `This invitation will expire on ${expirationDate}.`,
+    "",
+    "If you were not expecting this invitation, you may ignore this email.",
+    "",
+    "SESATS Administration",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+
+  const response = await Parse.Cloud.httpRequest({
+    method: "POST",
+    url: RESEND_API_URL,
+    headers: {
+      Authorization: `Bearer ${resendApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: RESEND_FROM_EMAIL,
+      to: [email],
+      subject: "SESATS Invitation",
+      html,
+      text,
+    }),
   });
 
-  return { delivered: true };
+  if (!response || response.status < 200 || response.status >= 300) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "Resend did not accept the invitation email request."
+    );
+  }
+
+  return response;
+}
+
+async function requirePendingInvitationByToken(token) {
+  const tokenHash = hashInvitationToken(requireString(token, "token"));
+  const now = new Date();
+  const query = new Parse.Query(UserInvitation);
+  query.equalTo("tokenHash", tokenHash);
+  query.equalTo("status", "pending");
+  query.greaterThan("tokenExpiresAt", now);
+  query.include("institution", "primarySpecialty", "invitedBy");
+  query.limit(1);
+
+  const invitation = await query.first({ useMasterKey: true });
+
+  if (!invitation) {
+    throw new Parse.Error(
+      Parse.Error.OBJECT_NOT_FOUND,
+      "This invitation is invalid, expired, or has already been accepted."
+    );
+  }
+
+  return invitation;
 }
 
 Parse.Cloud.define("inviteUser", async (request) => {
@@ -204,7 +435,8 @@ Parse.Cloud.define("inviteUser", async (request) => {
   const rawToken = generateInvitationToken();
   const now = new Date();
   const tokenExpiresAt = buildExpirationDate();
-  const invitationUrl = `/accept-invitation.html?token=${encodeURIComponent(rawToken)}`;
+  const invitationUrl = buildInvitationUrl(rawToken);
+  const roleDisplayName = getRoleDisplayName(roleName);
 
   const invitation = new UserInvitation();
   invitation.set("email", email);
@@ -226,14 +458,29 @@ Parse.Cloud.define("inviteUser", async (request) => {
   const savedInvitation = await invitation.save(null, { useMasterKey: true });
 
   try {
-    await sendInvitationEmailStub(email, invitationUrl, displayName, invitationMessage);
+    await sendInvitationEmail({
+      email,
+      displayName,
+      roleName,
+      invitationUrl,
+      tokenExpiresAt,
+      invitationMessage,
+    });
+
     savedInvitation.set("emailSentAt", new Date());
     savedInvitation.set("emailDeliveryStatus", "sent");
     await savedInvitation.save(null, { useMasterKey: true });
   } catch (error) {
     savedInvitation.set("emailDeliveryStatus", "failed");
+    savedInvitation.set(
+      "notes",
+      appendNotes(savedInvitation.get("notes"), `Email send error: ${error.message || error}`)
+    );
     await savedInvitation.save(null, { useMasterKey: true });
-    throw error;
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      error?.message || "Unable to send the invitation email."
+    );
   }
 
   return {
@@ -242,6 +489,73 @@ Parse.Cloud.define("inviteUser", async (request) => {
     email,
     displayName,
     roleName,
+    roleDisplayName,
     tokenExpiresAt: tokenExpiresAt.toISOString(),
+    emailDeliveryStatus: savedInvitation.get("emailDeliveryStatus") || "sent",
+  };
+});
+
+Parse.Cloud.define("acceptInvitation", async (request) => {
+  const params = request.params || {};
+  const token = requireString(params.token, "token");
+  const username = requireString(params.username, "username");
+  const password = requireString(params.password, "password");
+
+  if (password.length < 8) {
+    throw new Parse.Error(
+      Parse.Error.VALIDATION_ERROR,
+      "Password must be at least 8 characters long."
+    );
+  }
+
+  const invitation = await requirePendingInvitationByToken(token);
+  const email = normalizeEmail(invitation.get("email"));
+
+  await Promise.all([ensureUsernameIsAvailable(username), ensureNoExistingUserForEmail(email)]);
+
+  const roleName = requireAllowedValue(invitation.get("roleName"), "roleName", ALLOWED_ROLE_NAMES);
+  const role = await requireRoleByName(roleName);
+  const now = new Date();
+
+  const user = new Parse.User();
+  user.set("username", username);
+  user.set("password", password);
+  user.set("email", email);
+  user.set("emailVerified", true);
+  user.set("displayName", invitation.get("displayName") || "");
+  user.set("credentials", invitation.get("credentials") || "");
+  user.set("editorStatus", "active");
+  user.set("institution", invitation.get("institution") || null);
+  user.set("primarySpecialty", invitation.get("primarySpecialty") || null);
+  user.set("profileCompleted", true);
+  user.set("isActive", true);
+
+  const savedUser = await user.save(null, { useMasterKey: true });
+
+  const userRoleAssignment = new UserRoleAssignment();
+  userRoleAssignment.set("user", savedUser);
+  userRoleAssignment.set("roleName", roleName);
+  userRoleAssignment.set("institution", invitation.get("institution") || null);
+  userRoleAssignment.set("specialty", invitation.get("primarySpecialty") || null);
+  userRoleAssignment.set("assignedBy", invitation.get("invitedBy") || null);
+  userRoleAssignment.set("assignedAt", now);
+  userRoleAssignment.set("isActive", true);
+
+  const roleUsers = role.getUsers();
+  roleUsers.add(savedUser);
+
+  invitation.set("status", "accepted");
+  invitation.set("acceptedBy", savedUser);
+  invitation.set("acceptedAt", now);
+
+  await userRoleAssignment.save(null, { useMasterKey: true });
+  await role.save(null, { useMasterKey: true });
+  await invitation.save(null, { useMasterKey: true });
+
+  return {
+    success: true,
+    displayName: savedUser.get("displayName") || "",
+    email,
+    roleName,
   };
 });
