@@ -245,9 +245,9 @@ async function ensureUsernameIsAvailable(username) {
 
 async function requireRoleByName(roleName) {
   const roleQuery = new Parse.Query(Parse.Role);
-  roleQuery.equalTo("name", roleName);
-  roleQuery.limit(1);
+  roleQuery.limit(1000);
 
+  roleQuery.equalTo("name", roleName);
   const role = await roleQuery.first({ useMasterKey: true });
   if (!role) {
     throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND, "The requested role could not be found.");
