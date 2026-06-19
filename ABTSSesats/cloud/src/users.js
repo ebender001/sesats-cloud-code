@@ -108,16 +108,43 @@ function escapeHtml(value) {
 }
 
 function formatDateForDisplay(value) {
-  return new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    timeZone: "UTC",
-  }).format(value);
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const monthNames = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+
+  return `${monthNames[date.getUTCMonth()]} ${date.getUTCDate()}, ${date.getUTCFullYear()}`;
 }
 
 function buildInvitationUrl(rawToken) {
   return `${INVITATION_ACCEPT_BASE_URL}/accept-invitation.html?token=${encodeURIComponent(rawToken)}`;
+}
+
+function getInvitationGreetingName(invitation) {
+  const storedDisplayName = normalizeOptionalString(invitation?.get("displayName"), "displayName");
+
+  if (storedDisplayName) {
+    return storedDisplayName;
+  }
+
+  const storedEmail = normalizeOptionalString(invitation?.get("email"), "email");
+  return storedEmail ? storedEmail.split("@")[0] : "there";
 }
 
 function appendNotes(existingNotes, appendedMessage) {
@@ -338,8 +365,8 @@ function postJson(url, headers, payload) {
 }
 
 async function sendInvitationEmail({
+  invitation,
   email,
-  displayName,
   roleName,
   invitationUrl,
   tokenExpiresAt,
@@ -349,6 +376,7 @@ async function sendInvitationEmail({
   const resendFromEmail = requireResendFromEmail();
   const roleDisplayName = getRoleDisplayName(roleName);
   const expirationDate = formatDateForDisplay(tokenExpiresAt);
+  const greetingName = getInvitationGreetingName(invitation);
   const invitationMessageHtml = escapeHtml(invitationMessage).replace(/\n/g, "<br />");
   const messageSection = invitationMessage
     ? `
@@ -366,7 +394,7 @@ async function sendInvitationEmail({
           <h1 style="margin: 0; font-size: 24px;">SESATS Invitation</h1>
         </div>
         <div style="padding: 28px;">
-          <p style="margin: 0 0 18px; line-height: 1.7;">Dear ${escapeHtml(displayName)},</p>
+          <p style="margin: 0 0 18px; line-height: 1.7;">Dear ${escapeHtml(greetingName)},</p>
           <p style="margin: 0 0 18px; line-height: 1.7;">
             Please accept this invitation as a(n) ${escapeHtml(roleDisplayName)} for the SESATS Administration platform.
           </p>
@@ -395,7 +423,7 @@ async function sendInvitationEmail({
   `;
 
   const text = [
-    `Dear ${displayName},`,
+    `Dear ${greetingName},`,
     "",
     `Please accept this invitation as a(n) ${roleDisplayName} for the SESATS Administration platform.`,
     "",
@@ -512,8 +540,8 @@ Parse.Cloud.define("inviteUser", async (request) => {
 
   try {
     await sendInvitationEmail({
+      invitation: savedInvitation,
       email,
-      displayName,
       roleName,
       invitationUrl,
       tokenExpiresAt,
