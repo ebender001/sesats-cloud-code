@@ -1,6 +1,7 @@
 require("./src/institutions");
 require("./src/specialties");
 require("./src/auth");
+require("./src/users");
 require("./src/questions");
 
 Parse.Cloud.define("hello", () => {

@@ -118,8 +118,9 @@ Parse.Cloud.define("deleteSpecialty", async (request) => {
 Parse.Cloud.define("listSpecialties", async () => {
   const query = new Parse.Query(Specialty);
 
-  query.ascending("name");
-  query.select("name", "shortName");
+  query.ascending("sortOrder");
+  query.addAscending("name");
+  query.select("name", "shortName", "isActive", "sortOrder");
   query.limit(1000);
 
   const specialties = await query.find({ useMasterKey: true });
@@ -128,5 +129,7 @@ Parse.Cloud.define("listSpecialties", async () => {
     objectId: specialty.id,
     name: specialty.get("name") || "",
     shortName: specialty.get("shortName") || "",
+    isActive: specialty.get("isActive") !== false,
+    sortOrder: specialty.get("sortOrder") ?? null,
   }));
 });
