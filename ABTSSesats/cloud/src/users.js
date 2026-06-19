@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const https = require("https");
 
 const Institution = Parse.Object.extend("Institution");
 const Specialty = Parse.Object.extend("Specialty");
@@ -21,8 +22,6 @@ const RESEND_API_URL = "https://api.resend.com/emails";
 // TODO: Replace this with the real deployed website domain that serves accept-invitation.html.
 // For local testing, use localhost until a production domain is available.
 const INVITATION_ACCEPT_BASE_URL = "http://localhost:8000";
-// TODO: Replace this with a verified Resend sender domain before production use.
-const RESEND_FROM_EMAIL = "SESATS Administration <onboarding@YOUR_VERIFIED_RESEND_DOMAIN>";
 
 function requireString(value, fieldName) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -284,6 +283,60 @@ function requireResendApiKey() {
   return apiKey;
 }
 
+function requireResendFromEmail() {
+  const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.SESATS_INVITATION_FROM_EMAIL;
+
+  if (!fromEmail || typeof fromEmail !== "string" || fromEmail.trim().length === 0) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "RESEND_FROM_EMAIL or SESATS_INVITATION_FROM_EMAIL must be configured in the Back4App environment."
+    );
+  }
+
+  return fromEmail.trim();
+}
+
+function postJson(url, headers, payload) {
+  if (typeof fetch === "function") {
+    return fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }).then(async (response) => ({
+      status: response.status,
+      data: await response.text(),
+    }));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      url,
+      {
+        method: "POST",
+        headers,
+      },
+      (response) => {
+        let responseBody = "";
+
+        response.on("data", (chunk) => {
+          responseBody += chunk;
+        });
+
+        response.on("end", () => {
+          resolve({
+            status: response.statusCode || 0,
+            data: responseBody,
+          });
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.write(JSON.stringify(payload));
+    request.end();
+  });
+}
+
 async function sendInvitationEmail({
   email,
   displayName,
@@ -293,6 +346,7 @@ async function sendInvitationEmail({
   invitationMessage,
 }) {
   const resendApiKey = requireResendApiKey();
+  const resendFromEmail = requireResendFromEmail();
   const roleDisplayName = getRoleDisplayName(roleName);
   const expirationDate = formatDateForDisplay(tokenExpiresAt);
   const invitationMessageHtml = escapeHtml(invitationMessage).replace(/\n/g, "<br />");
@@ -360,26 +414,25 @@ async function sendInvitationEmail({
     .filter((line) => line !== null)
     .join("\n");
 
-  const response = await Parse.Cloud.httpRequest({
-    method: "POST",
-    url: RESEND_API_URL,
-    headers: {
+  const response = await postJson(
+    RESEND_API_URL,
+    {
       Authorization: `Bearer ${resendApiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      from: RESEND_FROM_EMAIL,
+    {
+      from: resendFromEmail,
       to: [email],
       subject: "SESATS Invitation",
       html,
       text,
-    }),
-  });
+    }
+  );
 
   if (!response || response.status < 200 || response.status >= 300) {
     throw new Parse.Error(
       Parse.Error.SCRIPT_FAILED,
-      "Resend did not accept the invitation email request."
+      `Resend did not accept the invitation email request.${response?.data ? ` ${response.data}` : ""}`
     );
   }
 
