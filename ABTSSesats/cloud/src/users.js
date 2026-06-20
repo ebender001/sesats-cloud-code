@@ -489,6 +489,31 @@ async function requirePendingInvitationByToken(token) {
   return invitation;
 }
 
+Parse.Cloud.define("listUsers", async (request) => {
+  const user = await requireAuthenticatedUser(request);
+  await requireAdminAccess(user);
+
+  const query = new Parse.Query(Parse.User);
+  query.include("institution", "primarySpecialty");
+  query.ascending("displayName", "username");
+  query.limit(1000);
+
+  const users = await query.find({ useMasterKey: true });
+
+  return users.map((listedUser) => {
+    const institution = listedUser.get("institution");
+    const specialty = listedUser.get("primarySpecialty");
+
+    return {
+      objectId: listedUser.id,
+      displayName: listedUser.get("displayName") || listedUser.get("username") || "",
+      credentials: listedUser.get("credentials") || "",
+      institutionName: institution?.get("name") || "",
+      specialtyName: specialty?.get("name") || "",
+    };
+  });
+});
+
 Parse.Cloud.define("inviteUser", async (request) => {
   const user = await requireAuthenticatedUser(request);
   await requireAdminAccess(user);
