@@ -1,6 +1,10 @@
 const Question = Parse.Object.extend("Question");
 const QuestionOption = Parse.Object.extend("QuestionOption");
 const ParseUser = Parse.User;
+const https = require("https");
+
+const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_REFERENCE_PARSER_MODEL = "gpt-4.1-mini";
 
 function requireString(value, fieldName) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -58,6 +62,128 @@ function normalizeOptionalNumber(value, fieldName) {
   }
 
   return value;
+}
+
+function requireOpenAiApiKey() {
+  const apiKey = process.env.OPENAI_API_KEY;
+
+  if (!apiKey || typeof apiKey !== "string" || apiKey.trim().length === 0) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "OPENAI_API_KEY is not configured in the Back4App environment."
+    );
+  }
+
+  return apiKey.trim();
+}
+
+function postJson(url, headers, payload) {
+  if (typeof fetch === "function") {
+    return fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    }).then(async (response) => ({
+      status: response.status,
+      data: await response.text(),
+    }));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      url,
+      {
+        method: "POST",
+        headers,
+      },
+      (response) => {
+        let responseBody = "";
+
+        response.on("data", (chunk) => {
+          responseBody += chunk;
+        });
+
+        response.on("end", () => {
+          resolve({
+            status: response.statusCode || 0,
+            data: responseBody,
+          });
+        });
+      }
+    );
+
+    request.on("error", reject);
+    request.write(JSON.stringify(payload));
+    request.end();
+  });
+}
+
+function normalizeParsedReferenceField(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeParsedReferenceYear(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+
+  const numericValue = Number.parseInt(String(value).trim(), 10);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function normalizeParsedReferencePmid(value) {
+  return normalizeParsedReferenceField(value).replace(/\D+/g, "");
+}
+
+function normalizeParsedReferenceDoi(value) {
+  return normalizeParsedReferenceField(value)
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, "")
+    .trim();
+}
+
+function normalizeParsedReference(rawReference, originalCitationText) {
+  const safeReference =
+    rawReference && typeof rawReference === "object" && !Array.isArray(rawReference)
+      ? rawReference
+      : {};
+
+  return {
+    title: normalizeParsedReferenceField(safeReference.title),
+    authors: normalizeParsedReferenceField(safeReference.authors),
+    journal: normalizeParsedReferenceField(safeReference.journal),
+    year: normalizeParsedReferenceYear(safeReference.year),
+    volume: normalizeParsedReferenceField(safeReference.volume),
+    issue: normalizeParsedReferenceField(safeReference.issue),
+    pages: normalizeParsedReferenceField(safeReference.pages),
+    pmid: normalizeParsedReferencePmid(safeReference.pmid),
+    doi: normalizeParsedReferenceDoi(safeReference.doi),
+    url: normalizeParsedReferenceField(safeReference.url),
+    citationText:
+      normalizeParsedReferenceField(safeReference.citationText) ||
+      normalizeParsedReferenceField(originalCitationText),
+    note: normalizeParsedReferenceField(safeReference.note),
+  };
+}
+
+function extractOpenAiMessageContent(payload) {
+  const content = payload?.choices?.[0]?.message?.content;
+
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("")
+      .trim();
+  }
+
+  return "";
 }
 
 function setUserPointer(question, fieldName, objectId) {
@@ -316,6 +442,112 @@ Parse.Cloud.define("listQuestions", async () => {
 
   const questions = await query.find({ useMasterKey: true });
   return serializeQuestionsWithOptions(questions);
+});
+
+Parse.Cloud.define("parseReferenceCitation", async (request) => {
+  const citationText = requireString(request.params?.citationText, "citationText");
+  const apiKey = requireOpenAiApiKey();
+
+  const payload = {
+    model: OPENAI_REFERENCE_PARSER_MODEL,
+    temperature: 0,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "parsed_reference",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string" },
+            authors: { type: "string" },
+            journal: { type: "string" },
+            year: { type: ["number", "null"] },
+            volume: { type: "string" },
+            issue: { type: "string" },
+            pages: { type: "string" },
+            pmid: { type: "string" },
+            doi: { type: "string" },
+            url: { type: "string" },
+            citationText: { type: "string" },
+            note: { type: "string" },
+          },
+          required: [
+            "title",
+            "authors",
+            "journal",
+            "year",
+            "volume",
+            "issue",
+            "pages",
+            "pmid",
+            "doi",
+            "url",
+            "citationText",
+            "note",
+          ],
+        },
+      },
+    },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You extract citation metadata from pasted references. Extract only information present in the citation. Do not invent missing fields. Normalize PMID to digits only. Normalize DOI without any leading doi URL prefix. Use year as a number when available. Put any uncertainty or extra citation information in note. Return JSON only.",
+      },
+      {
+        role: "user",
+        content: `Parse this citation into the required JSON schema:\n\n${citationText}`,
+      },
+    ],
+  };
+
+  const response = await postJson(
+    OPENAI_API_URL,
+    {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    payload
+  );
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "The reference parser could not process that citation right now."
+    );
+  }
+
+  let parsedResponse;
+  try {
+    parsedResponse = JSON.parse(response.data);
+  } catch (error) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "The reference parser returned an unreadable response."
+    );
+  }
+
+  const content = extractOpenAiMessageContent(parsedResponse);
+  if (!content) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "The reference parser did not return any parsed fields."
+    );
+  }
+
+  let parsedReference;
+  try {
+    parsedReference = JSON.parse(content);
+  } catch (error) {
+    throw new Parse.Error(
+      Parse.Error.SCRIPT_FAILED,
+      "The reference parser returned invalid JSON."
+    );
+  }
+
+  return normalizeParsedReference(parsedReference, citationText);
 });
 
 Parse.Cloud.define("addQuestionOption", async (request) => {
