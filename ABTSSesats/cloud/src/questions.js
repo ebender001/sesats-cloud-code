@@ -1,6 +1,8 @@
 const Question = Parse.Object.extend("Question");
 const QuestionOption = Parse.Object.extend("QuestionOption");
 const QuestionMedia = Parse.Object.extend("QuestionMedia");
+const QuestionReview = Parse.Object.extend("QuestionReview");
+const QuestionEditHistory = Parse.Object.extend("QuestionEditHistory");
 const Reference = Parse.Object.extend("Reference");
 const QuestionReference = Parse.Object.extend("QuestionReference");
 const ParseUser = Parse.User;
@@ -65,6 +67,26 @@ function normalizeOptionalNumber(value, fieldName) {
 
   if (typeof value !== "number" || Number.isNaN(value)) {
     throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `${fieldName} must be a number.`);
+  }
+
+  return value;
+}
+
+function normalizeOptionalObject(value, fieldName) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `${fieldName} must be an object.`);
+  }
+
+  return value;
+}
+
+function requireArray(value, fieldName) {
+  if (!Array.isArray(value)) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `${fieldName} must be an array.`);
   }
 
   return value;
@@ -596,6 +618,29 @@ function setQuestionPointer(option, questionObjectId) {
   option.set("question", question);
 }
 
+function setQuestionObjectPointer(target, question, fieldName = "question") {
+  if (!question?.id) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `${fieldName} requires a saved Question.`);
+  }
+
+  target.set(fieldName, question);
+}
+
+function setPointerFromObjectId(target, fieldName, ObjectClass, objectId, objectIdFieldName) {
+  if (objectId === undefined) {
+    return;
+  }
+
+  if (objectId === null || objectId === "") {
+    target.unset(fieldName);
+    return;
+  }
+
+  const pointer = new ObjectClass();
+  pointer.id = requireString(objectId, objectIdFieldName || `${fieldName}ObjectId`);
+  target.set(fieldName, pointer);
+}
+
 function applyQuestionOptionFields(
   option,
   params,
@@ -690,6 +735,149 @@ function applyQuestionReferenceFields(questionReference, params, { requireQuesti
   }
 }
 
+function applyQuestionReviewFields(questionReview, params, { requireQuestion = false } = {}) {
+  if (requireQuestion || Object.prototype.hasOwnProperty.call(params, "questionObjectId")) {
+    setQuestionPointer(questionReview, params.questionObjectId);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "reviewerObjectId")) {
+    setPointerFromObjectId(questionReview, "reviewer", ParseUser, params.reviewerObjectId, "reviewerObjectId");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "decision")) {
+    questionReview.set("decision", normalizeOptionalString(params.decision));
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "comments")) {
+    questionReview.set("comments", normalizeOptionalString(params.comments));
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "reviewedAt")) {
+    const reviewedAt = normalizeOptionalDate(params.reviewedAt, "reviewedAt");
+    if (reviewedAt === undefined) {
+      questionReview.unset("reviewedAt");
+    } else {
+      questionReview.set("reviewedAt", reviewedAt);
+    }
+  }
+}
+
+function applyQuestionEditHistoryFields(editHistory, params, { requireQuestion = false } = {}) {
+  if (requireQuestion || Object.prototype.hasOwnProperty.call(params, "questionObjectId")) {
+    setQuestionPointer(editHistory, params.questionObjectId);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "editorObjectId")) {
+    setPointerFromObjectId(editHistory, "editor", ParseUser, params.editorObjectId, "editorObjectId");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "editedAt")) {
+    const editedAt = normalizeOptionalDate(params.editedAt, "editedAt");
+    if (editedAt === undefined) {
+      editHistory.unset("editedAt");
+    } else {
+      editHistory.set("editedAt", editedAt);
+    }
+  }
+
+  ["previousStatus", "newStatus", "changeSummary"].forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(params, field)) {
+      editHistory.set(field, normalizeOptionalString(params[field]));
+    }
+  });
+
+  if (Object.prototype.hasOwnProperty.call(params, "previousSnapshot")) {
+    const previousSnapshot = normalizeOptionalObject(params.previousSnapshot, "previousSnapshot");
+    if (previousSnapshot === undefined) {
+      editHistory.unset("previousSnapshot");
+    } else {
+      editHistory.set("previousSnapshot", previousSnapshot);
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(params, "newSnapshot")) {
+    const newSnapshot = normalizeOptionalObject(params.newSnapshot, "newSnapshot");
+    if (newSnapshot === undefined) {
+      editHistory.unset("newSnapshot");
+    } else {
+      editHistory.set("newSnapshot", newSnapshot);
+    }
+  }
+}
+
+function createQuestionMediaObject({
+  question,
+  user,
+  fileName,
+  contentType,
+  base64Data,
+  placement,
+  mediaType,
+  caption,
+  altText,
+  sortOrder,
+}) {
+  const normalizedContentType = requireString(contentType, "contentType").toLowerCase();
+  const normalizedPlacement = requireAllowedValue(placement, "placement", ALLOWED_MEDIA_PLACEMENTS);
+  const normalizedMediaType = requireAllowedValue(mediaType, "mediaType", ALLOWED_MEDIA_TYPES);
+  const normalizedCaption = normalizeOptionalString(caption);
+  const normalizedAltText = normalizeOptionalString(altText);
+  const normalizedSortOrder =
+    sortOrder === undefined ? 0 : normalizeOptionalNumber(sortOrder, "sortOrder");
+
+  if (normalizedMediaType === "IMAGE" && !normalizedContentType.startsWith("image/")) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, "IMAGE uploads must use an image content type.");
+  }
+
+  if (normalizedMediaType === "VIDEO" && !normalizedContentType.startsWith("video/")) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, "VIDEO uploads must use a video content type.");
+  }
+
+  const fileBuffer = decodeBase64File(base64Data);
+  if (!fileBuffer.length) {
+    throw new Parse.Error(Parse.Error.VALIDATION_ERROR, "base64Data is invalid.");
+  }
+
+  const r2Config = requireR2Config();
+  const fileKey = buildQuestionMediaKey(question.id, normalizedPlacement, normalizedMediaType, fileName);
+  const publicUrl = buildPublicUrl(r2Config.endpoint, r2Config.bucketName, fileKey);
+
+  return {
+    fileBuffer,
+    upload: {
+      endpoint: r2Config.endpoint,
+      bucketName: r2Config.bucketName,
+      accessKeyId: r2Config.accessKeyId,
+      secretAccessKey: r2Config.secretAccessKey,
+      key: fileKey,
+      body: fileBuffer,
+      contentType: normalizedContentType,
+    },
+    object: (() => {
+      const questionMedia = new QuestionMedia();
+      questionMedia.set("question", question);
+      questionMedia.set("mediaType", normalizedMediaType);
+      questionMedia.set("storageProvider", "R2");
+      questionMedia.set("fileKey", fileKey);
+      questionMedia.set("publicUrl", publicUrl);
+      questionMedia.set("caption", normalizedCaption === undefined ? "" : normalizedCaption);
+      questionMedia.set("altText", normalizedAltText === undefined ? "" : normalizedAltText);
+      questionMedia.set("placement", normalizedPlacement);
+      questionMedia.set("sortOrder", normalizedSortOrder === undefined ? 0 : normalizedSortOrder);
+      questionMedia.set("uploadedBy", user);
+      questionMedia.set("uploadedAt", new Date());
+      questionMedia.set("status", "ACTIVE");
+      return questionMedia;
+    })(),
+    result: {
+      fileKey,
+      publicUrl,
+      mediaType: normalizedMediaType,
+      placement: normalizedPlacement,
+    },
+  };
+}
+
 function serializeQuestionOption(option) {
   return {
     objectId: option.id,
@@ -709,6 +897,255 @@ Parse.Cloud.define("addQuestion", async (request) => {
 
   const savedQuestion = await question.save(null, { useMasterKey: true });
   return serializeQuestionWithOptions(savedQuestion);
+});
+
+Parse.Cloud.define("saveQuestionBundle", async (request) => {
+  const user = requireAuthenticatedUser(request);
+  const params = request.params || {};
+  const questionParams = params.question && typeof params.question === "object" ? params.question : params;
+  const optionParams = params.options === undefined ? [] : requireArray(params.options, "options");
+  const referenceParams = params.references === undefined ? [] : requireArray(params.references, "references");
+  const mediaParams = params.media === undefined ? [] : requireArray(params.media, "media");
+  const reviewParams = params.review && typeof params.review === "object" ? params.review : null;
+  const editHistoryParams =
+    params.editHistory && typeof params.editHistory === "object" ? params.editHistory : null;
+
+  const question = new Question();
+  applyQuestionFields(question, questionParams, { requireStem: true });
+
+  if (!question.get("createdBy") && user?.id) {
+    question.set("createdBy", user);
+  }
+
+  if (!question.get("lastEditedBy") && user?.id) {
+    question.set("lastEditedBy", user);
+  }
+
+  if (!question.get("lastEditedAt")) {
+    question.set("lastEditedAt", new Date());
+  }
+
+  const savedQuestion = await question.save(null, { useMasterKey: true });
+
+  const savedOptions = [];
+  optionParams.forEach((optionParamsEntry, index) => {
+    if (!optionParamsEntry || typeof optionParamsEntry !== "object") {
+      throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `options[${index}] must be an object.`);
+    }
+
+    const option = new QuestionOption();
+    applyQuestionOptionFields(
+      option,
+      {
+        ...optionParamsEntry,
+        questionObjectId: savedQuestion.id,
+        sortOrder:
+          optionParamsEntry.sortOrder === undefined ? index : optionParamsEntry.sortOrder,
+      },
+      {
+        requireQuestion: true,
+        requireLabel: true,
+        requireText: true,
+      }
+    );
+    savedOptions.push(option);
+  });
+
+  const savedOptionRecords = savedOptions.length
+    ? await Parse.Object.saveAll(savedOptions, { useMasterKey: true })
+    : [];
+
+  const savedReferences = [];
+  const savedQuestionReferences = [];
+
+  referenceParams.forEach((referenceParamsEntry, index) => {
+    if (!referenceParamsEntry || typeof referenceParamsEntry !== "object") {
+      throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `references[${index}] must be an object.`);
+    }
+
+    const reference = new Reference();
+    applyReferenceFields(reference, referenceParamsEntry);
+
+    if (!reference.get("title") && !reference.get("pmid") && !reference.get("doi") && !reference.get("url")) {
+      throw new Parse.Error(
+        Parse.Error.VALIDATION_ERROR,
+        `references[${index}] must include at least a title, PMID, DOI, or URL.`
+      );
+    }
+
+    if (reference.get("isActive") === undefined) {
+      reference.set("isActive", true);
+    }
+
+    savedReferences.push(reference);
+  });
+
+  const savedReferenceRecords = savedReferences.length
+    ? await Parse.Object.saveAll(savedReferences, { useMasterKey: true })
+    : [];
+
+  savedReferenceRecords.forEach((savedReference, index) => {
+    const link = new QuestionReference();
+    applyQuestionReferenceFields(
+      link,
+      {
+        questionObjectId: savedQuestion.id,
+        referenceObjectId: savedReference.id,
+        sortOrder:
+          referenceParams[index].sortOrder === undefined ? index : referenceParams[index].sortOrder,
+        isPrimary:
+          referenceParams[index].isPrimary === undefined
+            ? index === 0
+            : referenceParams[index].isPrimary,
+        note: referenceParams[index].note,
+      },
+      { requireQuestion: true, requireReference: true }
+    );
+    savedQuestionReferences.push(link);
+  });
+
+  const savedQuestionReferenceRecords = savedQuestionReferences.length
+    ? await Parse.Object.saveAll(savedQuestionReferences, { useMasterKey: true })
+    : [];
+
+  const mediaUploads = mediaParams.map((mediaParamsEntry, index) => {
+    if (!mediaParamsEntry || typeof mediaParamsEntry !== "object") {
+      throw new Parse.Error(Parse.Error.VALIDATION_ERROR, `media[${index}] must be an object.`);
+    }
+
+    return createQuestionMediaObject({
+      question: savedQuestion,
+      user,
+      fileName: mediaParamsEntry.fileName,
+      contentType: mediaParamsEntry.contentType,
+      base64Data: mediaParamsEntry.base64Data,
+      placement: mediaParamsEntry.placement,
+      mediaType: mediaParamsEntry.mediaType,
+      caption: mediaParamsEntry.caption,
+      altText: mediaParamsEntry.altText,
+      sortOrder: mediaParamsEntry.sortOrder === undefined ? index : mediaParamsEntry.sortOrder,
+    });
+  });
+
+  for (const mediaUpload of mediaUploads) {
+    await putObjectToR2(mediaUpload.upload);
+  }
+
+  const savedMediaRecords = mediaUploads.length
+    ? await Parse.Object.saveAll(
+        mediaUploads.map((mediaUpload) => mediaUpload.object),
+        { useMasterKey: true }
+      )
+    : [];
+
+  let savedReview = null;
+  if (reviewParams) {
+    const questionReview = new QuestionReview();
+    applyQuestionReviewFields(
+      questionReview,
+      {
+        ...reviewParams,
+        questionObjectId: savedQuestion.id,
+        reviewerObjectId:
+          reviewParams.reviewerObjectId === undefined && user?.id ? user.id : reviewParams.reviewerObjectId,
+        reviewedAt:
+          reviewParams.reviewedAt === undefined ? new Date().toISOString() : reviewParams.reviewedAt,
+      },
+      { requireQuestion: true }
+    );
+    savedReview = await questionReview.save(null, { useMasterKey: true });
+  }
+
+  let savedEditHistory = null;
+  if (editHistoryParams) {
+    const editHistory = new QuestionEditHistory();
+    applyQuestionEditHistoryFields(
+      editHistory,
+      {
+        ...editHistoryParams,
+        questionObjectId: savedQuestion.id,
+        editorObjectId:
+          editHistoryParams.editorObjectId === undefined && user?.id
+            ? user.id
+            : editHistoryParams.editorObjectId,
+        editedAt:
+          editHistoryParams.editedAt === undefined ? new Date().toISOString() : editHistoryParams.editedAt,
+        newSnapshot:
+          editHistoryParams.newSnapshot === undefined
+            ? {
+                question: serializeQuestion(savedQuestion),
+                options: savedOptionRecords.map(serializeQuestionOption),
+                references: savedReferenceRecords.map((reference) => ({
+                  objectId: reference.id,
+                  title: reference.get("title") || "",
+                  authors: reference.get("authors") || "",
+                  journal: reference.get("journal") || "",
+                  year: reference.get("year"),
+                  volume: reference.get("volume") || "",
+                  issue: reference.get("issue") || "",
+                  pages: reference.get("pages") || "",
+                  doi: reference.get("doi") || "",
+                  pmid: reference.get("pmid") || "",
+                  url: reference.get("url") || "",
+                  citationText: reference.get("citationText") || "",
+                })),
+              }
+            : editHistoryParams.newSnapshot,
+      },
+      { requireQuestion: true }
+    );
+    savedEditHistory = await editHistory.save(null, { useMasterKey: true });
+  }
+
+  return {
+    success: true,
+    question: await serializeQuestionWithOptions(savedQuestion),
+    questionOptions: savedOptionRecords.map(serializeQuestionOption),
+    references: savedReferenceRecords.map((reference, index) => ({
+      objectId: reference.id,
+      questionReferenceObjectId: savedQuestionReferenceRecords[index]?.id || "",
+      sortOrder: savedQuestionReferenceRecords[index]?.get("sortOrder"),
+      isPrimary: savedQuestionReferenceRecords[index]?.get("isPrimary"),
+      note: savedQuestionReferenceRecords[index]?.get("note") || "",
+      title: reference.get("title") || "",
+      authors: reference.get("authors") || "",
+      journal: reference.get("journal") || "",
+      year: reference.get("year"),
+      volume: reference.get("volume") || "",
+      issue: reference.get("issue") || "",
+      pages: reference.get("pages") || "",
+      doi: reference.get("doi") || "",
+      pmid: reference.get("pmid") || "",
+      url: reference.get("url") || "",
+      citationText: reference.get("citationText") || "",
+    })),
+    media: savedMediaRecords.map((record, index) => ({
+      mediaId: record.id,
+      fileKey: mediaUploads[index].result.fileKey,
+      publicUrl: mediaUploads[index].result.publicUrl,
+      mediaType: mediaUploads[index].result.mediaType,
+      placement: mediaUploads[index].result.placement,
+    })),
+    review: savedReview
+      ? {
+          objectId: savedReview.id,
+          reviewerObjectId: serializePointer(savedReview.get("reviewer")),
+          decision: savedReview.get("decision") || "",
+          comments: savedReview.get("comments") || "",
+          reviewedAt: serializeDate(savedReview.get("reviewedAt")),
+        }
+      : null,
+    editHistory: savedEditHistory
+      ? {
+          objectId: savedEditHistory.id,
+          editorObjectId: serializePointer(savedEditHistory.get("editor")),
+          previousStatus: savedEditHistory.get("previousStatus") || "",
+          newStatus: savedEditHistory.get("newStatus") || "",
+          changeSummary: savedEditHistory.get("changeSummary") || "",
+          editedAt: serializeDate(savedEditHistory.get("editedAt")),
+        }
+      : null,
+  };
 });
 
 Parse.Cloud.define("getQuestion", async (request) => {
