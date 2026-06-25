@@ -1,4 +1,5 @@
 const Institution = Parse.Object.extend("Institution");
+const { applySeedMetadata } = require("./seedSupport");
 const GENERIC_INSTITUTION_TERMS = new Set([
   "and",
   "at",
@@ -132,6 +133,8 @@ function applyInstitutionFields(institution, params, { requireName = false } = {
 
     institution.set("isActive", params.isActive);
   }
+
+  applySeedMetadata(institution, params);
 }
 
 Parse.Cloud.define("addInstitution", async (request) => {

@@ -5,6 +5,7 @@ const Institution = Parse.Object.extend("Institution");
 const Specialty = Parse.Object.extend("Specialty");
 const UserInvitation = Parse.Object.extend("UserInvitation");
 const UserRoleAssignment = Parse.Object.extend("UserRoleAssignment");
+const { applySeedMetadata } = require("./seedSupport");
 
 const ALLOWED_ROLE_NAMES = new Set([
   "super_admin",
@@ -560,6 +561,7 @@ Parse.Cloud.define("inviteUser", async (request) => {
   invitation.set("invitationMessage", invitationMessage);
   invitation.set("emailDeliveryStatus", "pending");
   invitation.set("notes", notes);
+  applySeedMetadata(invitation, params);
 
   const savedInvitation = await invitation.save(null, { useMasterKey: true });
 
@@ -646,6 +648,9 @@ Parse.Cloud.define("acceptInvitation", async (request) => {
   userRoleAssignment.set("assignedBy", invitation.get("invitedBy") || null);
   userRoleAssignment.set("assignedAt", now);
   userRoleAssignment.set("isActive", true);
+  applySeedMetadata(userRoleAssignment, {
+    isSeedData: false,
+  });
 
   const roleUsers = role.getUsers();
   roleUsers.add(savedUser);
@@ -665,3 +670,7 @@ Parse.Cloud.define("acceptInvitation", async (request) => {
     roleName,
   };
 });
+
+module.exports = {
+  requireAdminAccess,
+};

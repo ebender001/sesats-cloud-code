@@ -8,6 +8,7 @@ const QuestionReference = Parse.Object.extend("QuestionReference");
 const ParseUser = Parse.User;
 const crypto = require("crypto");
 const https = require("https");
+const { applySeedMetadata, getSeedMetadataFromObject } = require("./seedSupport");
 
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_REFERENCE_PARSER_MODEL = "gpt-4.1-mini";
@@ -518,6 +519,9 @@ function applyQuestionFields(question, params, { requireStem = false } = {}) {
       question.set("lastEditedAt", lastEditedAt);
     }
   }
+
+  // Production CRUD must default isSeedData to false unless explicitly set.
+  applySeedMetadata(question, params);
 }
 
 function serializePointer(pointer) {
@@ -546,6 +550,8 @@ function serializeQuestion(question) {
     approvedAt: serializeDate(question.get("approvedAt")),
     lastEditedByObjectId: serializePointer(question.get("lastEditedBy")),
     lastEditedAt: serializeDate(question.get("lastEditedAt")),
+    isSeedData: question.get("isSeedData") === true,
+    seedBatchId: question.get("seedBatchId") || "",
     createdAt: serializeDate(question.createdAt),
     updatedAt: serializeDate(question.updatedAt),
   };
@@ -665,6 +671,8 @@ function applyQuestionOptionFields(
   if (Object.prototype.hasOwnProperty.call(params, "sortOrder")) {
     option.set("sortOrder", normalizeOptionalNumber(params.sortOrder, "sortOrder"));
   }
+
+  applySeedMetadata(option, params);
 }
 
 function applyReferenceFields(reference, params) {
@@ -700,6 +708,8 @@ function applyReferenceFields(reference, params) {
       reference.set("year", year);
     }
   }
+
+  applySeedMetadata(reference, params);
 }
 
 function setReferencePointer(questionReference, referenceObjectId) {
@@ -733,6 +743,8 @@ function applyQuestionReferenceFields(questionReference, params, { requireQuesti
   if (Object.prototype.hasOwnProperty.call(params, "note")) {
     questionReference.set("note", normalizeOptionalString(params.note));
   }
+
+  applySeedMetadata(questionReference, params);
 }
 
 function applyQuestionReviewFields(questionReview, params, { requireQuestion = false } = {}) {
@@ -760,6 +772,8 @@ function applyQuestionReviewFields(questionReview, params, { requireQuestion = f
       questionReview.set("reviewedAt", reviewedAt);
     }
   }
+
+  applySeedMetadata(questionReview, params);
 }
 
 function applyQuestionEditHistoryFields(editHistory, params, { requireQuestion = false } = {}) {
@@ -803,6 +817,8 @@ function applyQuestionEditHistoryFields(editHistory, params, { requireQuestion =
       editHistory.set("newSnapshot", newSnapshot);
     }
   }
+
+  applySeedMetadata(editHistory, params);
 }
 
 function createQuestionMediaObject({
@@ -816,6 +832,8 @@ function createQuestionMediaObject({
   caption,
   altText,
   sortOrder,
+  isSeedData,
+  seedBatchId,
 }) {
   const normalizedContentType = requireString(contentType, "contentType").toLowerCase();
   const normalizedPlacement = requireAllowedValue(placement, "placement", ALLOWED_MEDIA_PLACEMENTS);
@@ -867,6 +885,11 @@ function createQuestionMediaObject({
       questionMedia.set("uploadedBy", user);
       questionMedia.set("uploadedAt", new Date());
       questionMedia.set("status", "ACTIVE");
+      applySeedMetadata(
+        questionMedia,
+        { isSeedData, seedBatchId },
+        getSeedMetadataFromObject(question)
+      );
       return questionMedia;
     })(),
     result: {
@@ -886,6 +909,8 @@ function serializeQuestionOption(option) {
     text: option.get("text") || "",
     isCorrect: option.get("isCorrect"),
     sortOrder: option.get("sortOrder"),
+    isSeedData: option.get("isSeedData") === true,
+    seedBatchId: option.get("seedBatchId") || "",
     createdAt: serializeDate(option.createdAt),
     updatedAt: serializeDate(option.updatedAt),
   };
@@ -939,6 +964,14 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
       {
         ...optionParamsEntry,
         questionObjectId: savedQuestion.id,
+        isSeedData:
+          optionParamsEntry.isSeedData === undefined
+            ? savedQuestion.get("isSeedData") === true
+            : optionParamsEntry.isSeedData,
+        seedBatchId:
+          optionParamsEntry.seedBatchId === undefined
+            ? savedQuestion.get("seedBatchId")
+            : optionParamsEntry.seedBatchId,
         sortOrder:
           optionParamsEntry.sortOrder === undefined ? index : optionParamsEntry.sortOrder,
       },
@@ -964,7 +997,17 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
     }
 
     const reference = new Reference();
-    applyReferenceFields(reference, referenceParamsEntry);
+    applyReferenceFields(reference, {
+      ...referenceParamsEntry,
+      isSeedData:
+        referenceParamsEntry.isSeedData === undefined
+          ? savedQuestion.get("isSeedData") === true
+          : referenceParamsEntry.isSeedData,
+      seedBatchId:
+        referenceParamsEntry.seedBatchId === undefined
+          ? savedQuestion.get("seedBatchId")
+          : referenceParamsEntry.seedBatchId,
+    });
 
     if (!reference.get("title") && !reference.get("pmid") && !reference.get("doi") && !reference.get("url")) {
       throw new Parse.Error(
@@ -991,6 +1034,14 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
       {
         questionObjectId: savedQuestion.id,
         referenceObjectId: savedReference.id,
+        isSeedData:
+          referenceParams[index].isSeedData === undefined
+            ? savedQuestion.get("isSeedData") === true
+            : referenceParams[index].isSeedData,
+        seedBatchId:
+          referenceParams[index].seedBatchId === undefined
+            ? savedQuestion.get("seedBatchId")
+            : referenceParams[index].seedBatchId,
         sortOrder:
           referenceParams[index].sortOrder === undefined ? index : referenceParams[index].sortOrder,
         isPrimary:
@@ -1023,6 +1074,14 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
       mediaType: mediaParamsEntry.mediaType,
       caption: mediaParamsEntry.caption,
       altText: mediaParamsEntry.altText,
+      isSeedData:
+        mediaParamsEntry.isSeedData === undefined
+          ? savedQuestion.get("isSeedData") === true
+          : mediaParamsEntry.isSeedData,
+      seedBatchId:
+        mediaParamsEntry.seedBatchId === undefined
+          ? savedQuestion.get("seedBatchId")
+          : mediaParamsEntry.seedBatchId,
       sortOrder: mediaParamsEntry.sortOrder === undefined ? index : mediaParamsEntry.sortOrder,
     });
   });
@@ -1048,6 +1107,14 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
         questionObjectId: savedQuestion.id,
         reviewerObjectId:
           reviewParams.reviewerObjectId === undefined && user?.id ? user.id : reviewParams.reviewerObjectId,
+        isSeedData:
+          reviewParams.isSeedData === undefined
+            ? savedQuestion.get("isSeedData") === true
+            : reviewParams.isSeedData,
+        seedBatchId:
+          reviewParams.seedBatchId === undefined
+            ? savedQuestion.get("seedBatchId")
+            : reviewParams.seedBatchId,
         reviewedAt:
           reviewParams.reviewedAt === undefined ? new Date().toISOString() : reviewParams.reviewedAt,
       },
@@ -1068,6 +1135,14 @@ Parse.Cloud.define("saveQuestionBundle", async (request) => {
           editHistoryParams.editorObjectId === undefined && user?.id
             ? user.id
             : editHistoryParams.editorObjectId,
+        isSeedData:
+          editHistoryParams.isSeedData === undefined
+            ? savedQuestion.get("isSeedData") === true
+            : editHistoryParams.isSeedData,
+        seedBatchId:
+          editHistoryParams.seedBatchId === undefined
+            ? savedQuestion.get("seedBatchId")
+            : editHistoryParams.seedBatchId,
         editedAt:
           editHistoryParams.editedAt === undefined ? new Date().toISOString() : editHistoryParams.editedAt,
         newSnapshot:
@@ -1361,6 +1436,7 @@ Parse.Cloud.define("uploadQuestionMedia", async (request) => {
   questionMedia.set("uploadedBy", user);
   questionMedia.set("uploadedAt", new Date());
   questionMedia.set("status", "ACTIVE");
+  applySeedMetadata(questionMedia, params, getSeedMetadataFromObject(question));
 
   // Frontend should call Parse.Cloud.run("uploadQuestionMedia", params) after the user
   // has selected a file and a Question has already been created, so questionId is valid.

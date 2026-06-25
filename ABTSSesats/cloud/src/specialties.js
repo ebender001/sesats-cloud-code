@@ -1,4 +1,5 @@
 const Specialty = Parse.Object.extend("Specialty");
+const { applySeedMetadata } = require("./seedSupport");
 
 function normalizeOptionalString(value) {
   if (value === undefined || value === null) {
@@ -71,6 +72,8 @@ function applySpecialtyFields(specialty, params, { requireName = false } = {}) {
       specialty.set("parentSpecialty", parentSpecialty);
     }
   }
+
+  applySeedMetadata(specialty, params);
 }
 
 Parse.Cloud.define("addSpecialty", async (request) => {

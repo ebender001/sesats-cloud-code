@@ -1,5 +1,6 @@
 const Topic = Parse.Object.extend("Topic");
 const Specialty = Parse.Object.extend("Specialty");
+const { applySeedMetadata } = require("./seedSupport");
 
 function requireString(value, fieldName) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -69,6 +70,7 @@ Parse.Cloud.define("addTopic", async (request) => {
   topic.set("name", name);
   topic.set("specialtyObjectId", specialtyObjectId);
   topic.set("specialty", specialty);
+  applySeedMetadata(topic, params);
 
   const savedTopic = await topic.save(null, { useMasterKey: true });
 
@@ -134,6 +136,7 @@ Parse.Cloud.define("syncSubsetTopics", async (request) => {
       topic.set("name", name);
       topic.set("specialtyObjectId", targetSpecialtyObjectId);
       topic.set("specialty", targetSpecialty);
+      applySeedMetadata(topic, { isSeedData: false });
       return topic;
     });
 
